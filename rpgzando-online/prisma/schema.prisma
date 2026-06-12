@@ -1,0 +1,193 @@
+// Prisma schema for RPGzando Online MVP
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------
+// Auth
+// ----------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  characters Character[]
+  campaigns  Campaign[]
+  diceRolls  DiceRoll[]
+}
+
+// ----------------------------------------------------------------------
+// Character
+// ----------------------------------------------------------------------
+
+model Character {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name  String
+  race  String
+  class String
+  level Int    @default(1)
+
+  hpMax     Int @default(10)
+  hpCurrent Int @default(10)
+
+  strength     Int @default(10)
+  dexterity    Int @default(10)
+  constitution Int @default(10)
+  intelligence Int @default(10)
+  wisdom       Int @default(10)
+  charisma     Int @default(10)
+
+  gold Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  inventory InventoryItem[]
+  campaign  Campaign?
+}
+
+model InventoryItem {
+  id          String  @id @default(cuid())
+  characterId String
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  name        String
+  quantity    Int     @default(1)
+  description String?
+
+  createdAt DateTime @default(now())
+}
+
+// ----------------------------------------------------------------------
+// Campaign (a solo D&D 5e session conducted by the AI Game Master)
+// ----------------------------------------------------------------------
+
+enum CampaignStatus {
+  ACTIVE
+  ENDED
+}
+
+model Campaign {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  characterId String    @unique
+  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  title   String
+  status  CampaignStatus @default(ACTIVE)
+
+  // Short rolling summary of "where the story is" so the Game Master Service
+  // can resume narration without replaying the full message history.
+  summary String @default("")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages       Message[]
+  journalEntries JournalEntry[]
+  diceRolls      DiceRoll[]
+}
+
+// ----------------------------------------------------------------------
+// Chat between the player and the Game Master
+// ----------------------------------------------------------------------
+
+enum MessageSender {
+  PLAYER
+  GM
+  SYSTEM
+}
+
+model Message {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  sender  MessageSender
+  content String
+
+  createdAt DateTime @default(now())
+
+  @@index([campaignId, createdAt])
+}
+
+// ----------------------------------------------------------------------
+// Campaign journal: events, decisions and quests
+// ----------------------------------------------------------------------
+
+enum JournalEntryType {
+  EVENT
+  DECISION
+  QUEST
+}
+
+enum JournalEntryStatus {
+  ACTIVE
+  COMPLETED
+}
+
+model JournalEntry {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  type        JournalEntryType
+  title       String
+  description String
+  status      JournalEntryStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+
+  @@index([campaignId, type])
+}
+
+// ----------------------------------------------------------------------
+// Dice rolls
+// ----------------------------------------------------------------------
+
+enum DiceType {
+  D4
+  D6
+  D8
+  D10
+  D12
+  D20
+  D100
+}
+
+model DiceRoll {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  campaignId String?
+  campaign   Campaign? @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  diceType DiceType
+  quantity Int      @default(1)
+  modifier Int      @default(0)
+  results  Int[]
+  total    Int
+
+  label String?
+
+  createdAt DateTime @default(now())
+
+  @@index([campaignId, createdAt])
+}
