@@ -4,7 +4,17 @@ import { redirect, notFound } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
-import { gameMasterService, type GameMasterCharacterSnapshot } from "@/lib/gameMaster";
+import {
+  gameMasterService,
+  type GameMasterCharacterSnapshot,
+  type GameMasterDiceContext,
+  type GameMasterJournalContext,
+} from "@/lib/gameMaster";
+import {
+  RECENT_DICE_ROLL_LIMIT,
+  RECENT_JOURNAL_ENTRY_LIMIT,
+  RECENT_MESSAGE_LIMIT,
+} from "@/lib/gameMaster/summarizer";
 import {
   rollDice,
   formatRollOutcome,
@@ -12,13 +22,13 @@ import {
   MAX_DICE_QUANTITY,
   MAX_DICE_MODIFIER,
 } from "@/lib/dice";
-import type { Campaign, Character, DiceType, MessageSender } from "@prisma/client";
+import type { Campaign, Character, DiceType, InventoryItem, MessageSender } from "@prisma/client";
 
 export interface CampaignFormState {
   error?: string;
 }
 
-function toSnapshot(character: Character): GameMasterCharacterSnapshot {
+function toSnapshot(character: Character & { inventory: InventoryItem[] }): GameMasterCharacterSnapshot {
   return {
     name: character.name,
     race: character.race,
@@ -27,16 +37,29 @@ function toSnapshot(character: Character): GameMasterCharacterSnapshot {
     hpCurrent: character.hpCurrent,
     hpMax: character.hpMax,
     gold: character.gold,
+    attributes: {
+      strength: character.strength,
+      dexterity: character.dexterity,
+      constitution: character.constitution,
+      intelligence: character.intelligence,
+      wisdom: character.wisdom,
+      charisma: character.charisma,
+    },
+    inventory: character.inventory.map((item) => ({
+      name: item.name,
+      quantity: item.quantity,
+      description: item.description,
+    })),
   };
 }
 
 export async function getOwnedCampaign(
   userId: string,
   campaignId: string
-): Promise<Campaign & { character: Character }> {
+): Promise<Campaign & { character: Character & { inventory: InventoryItem[] } }> {
   const campaign = await prisma.campaign.findFirst({
     where: { id: campaignId, userId },
-    include: { character: true },
+    include: { character: { include: { inventory: true } } },
   });
 
   if (!campaign) {
@@ -56,7 +79,7 @@ export async function startCampaignAction(
 
   const character = await prisma.character.findFirst({
     where: { id: characterId, userId: user.id },
-    include: { campaign: true },
+    include: { campaign: true, inventory: true },
   });
 
   if (!character) {
@@ -126,23 +149,66 @@ export async function sendMessageAction(
   const campaign = await getOwnedCampaign(user.id, campaignId);
   const character = campaign.character;
 
-  const recentMessages = await prisma.message.findMany({
-    where: { campaignId },
-    orderBy: { createdAt: "desc" },
-    take: 6,
-  });
+  const [recentMessages, activeQuests, completedQuests, recentEvents, recentDecisions, recentDiceRolls] =
+    await Promise.all([
+      prisma.message.findMany({
+        where: { campaignId },
+        orderBy: { createdAt: "desc" },
+        take: RECENT_MESSAGE_LIMIT,
+      }),
+      prisma.journalEntry.findMany({
+        where: { campaignId, type: "QUEST", status: "ACTIVE" },
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.journalEntry.findMany({
+        where: { campaignId, type: "QUEST", status: "COMPLETED" },
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.journalEntry.findMany({
+        where: { campaignId, type: "EVENT" },
+        orderBy: { createdAt: "desc" },
+        take: RECENT_JOURNAL_ENTRY_LIMIT,
+      }),
+      prisma.journalEntry.findMany({
+        where: { campaignId, type: "DECISION" },
+        orderBy: { createdAt: "desc" },
+        take: RECENT_JOURNAL_ENTRY_LIMIT,
+      }),
+      prisma.diceRoll.findMany({
+        where: { campaignId },
+        orderBy: { createdAt: "desc" },
+        take: RECENT_DICE_ROLL_LIMIT,
+      }),
+    ]);
   recentMessages.reverse();
-
-  const latestDiceRoll = await prisma.diceRoll.findFirst({
-    where: { campaignId },
-    orderBy: { createdAt: "desc" },
-  });
+  recentEvents.reverse();
+  recentDecisions.reverse();
+  recentDiceRolls.reverse();
 
   const lastGmMessage = recentMessages.findLast((message) => message.sender === "GM");
+  const latestDiceRoll = recentDiceRolls.at(-1);
   const freshDiceRoll =
     latestDiceRoll && (!lastGmMessage || latestDiceRoll.createdAt > lastGmMessage.createdAt)
       ? latestDiceRoll
       : null;
+
+  const toDiceContext = (roll: (typeof recentDiceRolls)[number]): GameMasterDiceContext => ({
+    description: formatRollOutcome({
+      diceType: roll.diceType,
+      quantity: roll.quantity,
+      modifier: roll.modifier,
+      results: roll.results,
+      total: roll.total,
+    }),
+    total: roll.total,
+  });
+
+  const journal: GameMasterJournalContext = {
+    activeQuests: activeQuests.map((entry) => ({ title: entry.title, description: entry.description })),
+    completedQuests: completedQuests.map((entry) => ({ title: entry.title, description: entry.description })),
+    recentEvents: recentEvents.map((entry) => ({ title: entry.title, description: entry.description })),
+    recentDecisions: recentDecisions.map((entry) => ({ title: entry.title, description: entry.description })),
+  };
 
   const turnResult = await gameMasterService.takeTurn({
     character: toSnapshot(character),
@@ -152,19 +218,10 @@ export async function sendMessageAction(
       sender: message.sender,
       content: message.content,
     })),
+    journal,
+    recentDiceRolls: recentDiceRolls.map(toDiceContext),
     playerMessage: trimmed,
-    lastDiceRoll: freshDiceRoll
-      ? {
-          description: formatRollOutcome({
-            diceType: freshDiceRoll.diceType,
-            quantity: freshDiceRoll.quantity,
-            modifier: freshDiceRoll.modifier,
-            results: freshDiceRoll.results,
-            total: freshDiceRoll.total,
-          }),
-          total: freshDiceRoll.total,
-        }
-      : null,
+    lastDiceRoll: freshDiceRoll ? toDiceContext(freshDiceRoll) : null,
   });
 
   const change = turnResult.characterStateChange;
